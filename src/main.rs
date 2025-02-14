@@ -2,7 +2,7 @@ use std::{fs::{read_to_string, File, OpenOptions}, time::Duration};
 
 use anyhow::Context;
 use clap::{ArgGroup, Parser};
-use groups::{memory::MemoryMetrics, processdb::ProcessDB};
+use groups::{custom::CustomMetrics, memory::MemoryMetrics, output::Output, pipeline::Pipeline, processdb::ProcessDB};
 use reqwest::IntoUrl;
 use serde_json::{Map, Value};
 use spinners::{Spinner, Spinners};
@@ -13,9 +13,6 @@ use tracing_subscriber::EnvFilter;
 use watchers::run_watch;
 use std::io::prelude::*;
 
-mod perf;
-mod stat;
-mod fields;
 mod groups;
 mod watchers;
 
@@ -24,7 +21,7 @@ mod watchers;
 #[clap(author, version, about, long_about = None)]
 #[clap(group(
     ArgGroup::new("fields")
-        .args(&["metrics", "memory", "cpu", "processdb"]) // if you're adding new metric groups, be sure to add them here
+        .args(&["metrics", "memory", "cpu", "processdb", "pipeline", "output", "ndjson"]) // if you're adding new metric groups, be sure to add them here
         .multiple(true)
         .required(true)
 ))]
@@ -43,7 +40,7 @@ struct Cli {
     #[arg(long, short, default_value_t = 5 )]
     interval: u64,
 
-    /// A list of metrics to monitor, in dot-notation
+    /// A list of custom metrics to monitor, in dot-notation
     #[arg(long, short)]
     metrics: Option<Vec<String>>,
 
@@ -59,9 +56,18 @@ struct Cli {
     #[arg(long)]
     processdb: bool,
 
+    /// report libbeat pipeline metrics
+    #[arg(long)]
+    pipeline: bool,
+
+    /// Report output event metrics
+    #[arg(long)]
+    output: bool,
+
     /// Debug logging
     #[arg(long, short)]
     verbose: bool,
+
 
     /// dump all beat metrics to an ndjson file
     #[arg(long)]
@@ -77,17 +83,32 @@ fn default_endpoint() -> String {
     "localhost:5066".to_string()
 }
 
-fn generate_readers(args: &Cli, tx: &mut Sender<Map<String, Value>>) -> JoinSet<()> {
+
+fn generate_readers(args: &Cli, tx: &mut Sender<Map<String, Value>>, realtime: bool) -> JoinSet<()> {
     let mut set = JoinSet::new();
     if args.memory {
-        run_watch::<MemoryMetrics>(&mut set, tx);
+        run_watch::<MemoryMetrics>(&mut set, tx, None, realtime);
     }
     if args.processdb {
-        run_watch::<ProcessDB>(&mut set, tx);
+        run_watch::<ProcessDB>(&mut set, tx, None, realtime);
     }
+
+    if args.pipeline {
+        run_watch::<Pipeline>(&mut set, tx, None, realtime);
+    }
+
+    if args.output {
+        run_watch::<Output>(&mut set, tx, None, realtime);
+    }
+
+    if  args.metrics.is_some() {
+        run_watch::<CustomMetrics>(&mut set, tx, args.metrics.clone(), realtime);
+    }
+
     set
 }
 
+/// Sit and read events
 async fn watch(stat_path: String, args: Cli) -> anyhow::Result<()> {
     let token = CancellationToken::new();
     let cloned_token = token.clone();
@@ -107,12 +128,11 @@ async fn watch(stat_path: String, args: Cli) -> anyhow::Result<()> {
 
     // ======= init metrics channels
     let (mut tx,  _) = broadcast::channel(100);
-    let _readers_handle = generate_readers(&args, &mut tx);
+    let _readers_handle = generate_readers(&args, &mut tx, true);
 
-    
     let mut interval = time::interval(Duration::from_secs(args.interval));
     info!("starting watch of beat stats...");
-   //let mut count = 0;
+
     loop {
         let mut sp = Spinner::new(Spinners::Dots9, "Watching...".into());
         
@@ -123,21 +143,25 @@ async fn watch(stat_path: String, args: Cli) -> anyhow::Result<()> {
                 return Ok(());
             }
             _ = interval.tick() => {
-                match get_stat(&stat_path, &mut nd_file).await {
-                    Ok(res) => {
-                       match tx.send(res){
-                        Ok(c) => {
-                            debug!("sent to {} monitors", c);
-                        }, 
+                let res = get_stat(&stat_path, &mut nd_file).await;
+                if tx.receiver_count() > 0 {
+                    match  res {
+                        Ok(res) => {
+                           match tx.send(res){
+                            Ok(c) => {
+                                debug!("sent to {} monitors", c);
+                            }, 
+                            Err(e) => {
+                                error!("error sending event: {}", e);
+                            }
+                           }
+                        },
                         Err(e) => {
-                            error!("error sending event {}", e);
+                            error!("got error fetching stats: {}", e)
                         }
-                       }
-                    },
-                    Err(e) => {
-                        error!("got error fetching stats: {}", e)
                     }
                 }
+
             }
         }
     }
@@ -158,10 +182,11 @@ async fn get_stat<T: IntoUrl>(stat_path: T, fname: &mut Option<File>) -> anyhow:
     Ok(result)
 }
 
+/// ingest all metrics from a file
 async fn read_file<T: AsRef<str>>(path: T, args: Cli) -> anyhow::Result<()> {
     let raw = read_to_string(path.as_ref()).context("error reading file to string")?;
     let (mut tx,  _) = broadcast::channel(100);
-    let mut readers_handle = generate_readers(&args, &mut tx);
+    let mut readers_handle = generate_readers(&args, &mut tx, false);
     for point in raw.split('\n') {
         if point.is_empty() {
             continue;

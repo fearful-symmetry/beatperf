@@ -5,18 +5,18 @@ use tracing::debug;
 use crate::groups::*;
 use super::{generic::{Generic, NoOpProcess}, Watcher};
 
-const PROCDB_KEY: &str = "processor.add_session_metadata.processdb";
+const PROCDB_KEY: &str = "libbeat.output.events";
 
-pub struct ProcessDB {
+pub struct Output {
     group: Generic<u64, NoOpProcess<u64>>,
     fname: String
 }
 
 
-impl Watcher for ProcessDB {
+impl Watcher for Output {
     fn new(_ : Option<Vec<String>>) -> Self {
         let group = Generic::from(vec![PROCDB_KEY]);
-        ProcessDB { group, fname: "processdb".to_string() }
+        Output { group, fname: "Output Events".to_string() }
     }
 
     fn update(&mut self, new: &serde_json::Map<String, serde_json::Value>) {

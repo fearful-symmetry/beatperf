@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use plotters::prelude::*;
 use tracing::debug;
 
@@ -6,7 +6,7 @@ use crate::groups::*;
 
 use super::{generic::{Generic, Processor}, Watcher};
 
-
+/// A processor for turning our bytes into kB
 pub struct MemoryProcessor {}
 
 impl Processor for MemoryProcessor {
@@ -27,7 +27,7 @@ pub struct MemoryMetrics {
 
 impl Watcher for MemoryMetrics {
 
-    fn new() -> Self {
+    fn new(_ : Option<Vec<String>>) -> Self {
         let group = Generic::from(vec!["beat.memstats"]);
         MemoryMetrics { group, fname: "memstat".to_string() }
     }
@@ -41,10 +41,7 @@ impl Watcher for MemoryMetrics {
         // filter out the memory_total metric, which is a massive counter that sums all memory bytes
         map_data.remove("beat.memstats.memory_total");
 
-        let max = map_data.iter().filter_map(| (_key, value) | value.iter().copied().reduce(f64::max))
-            .reduce(f64::max).ok_or_else(||anyhow!("data does not have any values"))?;
-        let min = map_data.iter().filter_map(| (_key, value) | value.iter().copied().reduce(f64::min))
-            .reduce(f64::min).ok_or_else(||anyhow!("data does not have any values"))?;
+        let (min, max) = get_min_max_float(&map_data)?;
 
         // give the top of the chart some headroom, this way the legend won't collide with the graphs.
         let headroom = (max - min) * HEADROOM_CHART_MAX;
@@ -55,7 +52,7 @@ impl Watcher for MemoryMetrics {
         let root = SVGBackend::new(&name, SVG_SIZE).into_drawing_area();
         root.fill(&WHITE)?;
     
-        let mut chart = setup_graph(self.fname.clone(), &root);
+        let mut chart = setup_graph(self.fname.clone(), &root, DEFAULT_GRAPH_MARGIN, LABEL_SIZE_LEFT);
         let mut chart_con = chart.build_cartesian_2d(0usize..self.group.datapoints(), min..(max + headroom))?;
     
         chart_con.configure_mesh().x_desc("Datapoints").y_desc("Memory Usage").y_label_formatter(&|i| kbyte_formatter(*i)).draw()?;

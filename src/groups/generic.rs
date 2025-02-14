@@ -7,15 +7,23 @@
 use std::{collections::{HashMap, VecDeque}, marker::PhantomData};
 
 use serde::de::DeserializeOwned;
+use serde_json::Number;
 use tracing::{debug, error};
 
+/// A processor provides a way for a user of the Generic type to "preprocess"
+/// metrics before they are ingested, for example, converting bytes to kb.
+/// `NoOpProcess` is provided for users who do not require processing
 pub trait Processor {
+    /// The expected input type, usually f64 or u64
     type InValue;
+    /// The type after `process()`. Must match the numerical type of the `Generic` instance
     type OutValue;
     fn new() -> Self;
+    /// Process the metric
     fn process(&self, raw: Self::InValue) -> Self::OutValue;
 }
 
+/// Do not process the metric before its ingested
 pub struct NoOpProcess<T>{
     data_type: PhantomData<T>
 }
@@ -31,15 +39,16 @@ impl<T> Processor for NoOpProcess<T>{
     }
 }
 
-
+/// An individual metric field. We use this as we don't actually need a hashmap.
 struct MetricField<T: Clone > {
     key: String,
     values: Vec<T>
 }
 
+/// A grouping of metrics of a single type.
  pub struct Generic<T: Clone + DeserializeOwned, Proc: Processor> {
     user_key: Vec<String>,
-    // lazily instantiated
+    // data is lazily instantiated, as we can't verify the type until we get a json event
     data: Vec<MetricField<T>>,
     datapoints: usize, 
     processor: Proc
@@ -49,7 +58,7 @@ impl<F, T, P, I> From<Vec<F>> for Generic<T, P>
 where 
     F: ToString,
     T: Clone +  DeserializeOwned,
-    I: Ord + Clone +DeserializeOwned,
+    I:  Clone +DeserializeOwned,
     P: Processor<InValue = I, OutValue = T>
 {
     fn from(value: Vec<F>) -> Self {
@@ -61,13 +70,27 @@ where
 impl<T, Proc, I> Generic<T, Proc>
 where
     T: Clone +DeserializeOwned,
-    I: Ord + Clone +DeserializeOwned,
+    I: Clone +DeserializeOwned,
     Proc: Processor<InValue = I, OutValue = T>
 {
+    /// Create a new generic from a given group of metrics in dot notation and a processor.
+    /// The elements of a group can either point to a list of individual metrics, or a map that `Generic`
+    /// can reduce down to a list. 
+    /// ```
+    /// // A single event, which will be of type u64
+    /// let new: Generic<u64, NoOpProcess<u64>> = Generic::from(vec![".beat.runtime.goroutines"]);
+    /// 
+    /// // A group of metrics, which will all be of type u64
+    /// let new: Generic<u64, NoOpProcess<u64>> = Generic::from(vec![".beat.runtime"]);
+    /// ```
+    /// 
+    /// All the metrics must be of type `T`, while `I` is the type as seen in the raw json event.
+    /// The internal list of metrics is lazily instantiated, and all the internal types and fields will not be resolved until the first `update()`.
     pub fn new(group: Vec<String>, processor: Proc) -> Generic<T, Proc> {
         Generic { user_key: group, data: Vec::new(), datapoints: 0 , processor}
     }
 
+    /// Update the metrics
     pub fn update(&mut self, root: &serde_json::Map<String, serde_json::Value>)  {
         // lazily initialize the vectors
         if self.data.is_empty() {
@@ -81,7 +104,7 @@ where
                     let raw: I = match serde_json::from_value(val.clone()){
                         Ok(v) => v,
                         Err(e) => {
-                            error!("could not add metric {} to monitor, got unexpected type: {}", metric.key, e);
+                            error!("could not report {}, got unexpected type: {}", metric.key, e);
                             continue;
                         } 
                     };
@@ -91,30 +114,12 @@ where
                     debug!("key {} does not exist", metric.key);
                 }
             }
-            // match new_data {
-            //     Some(serde_json::Value::Number(val))  => {
-            //         let wrapper: ValueHandler = val.into();
-            //         let ours: T = match wrapper.try_into() {
-            //             Ok(v) => v, 
-            //             Err(_) => {
-            //                 error!("could not add metric {} to monitor, got unexpected type", metric.key);
-            //                 continue;
-            //             }
-            //         };
-            //         metric.values.push(ours);
-            //     }
-            //     None => {
-            //         debug!("key {} does not exist", metric.key);
-            //     },
-            //     _ => {
-            //         error!("key {} is not a number!", metric.key);
-            //     }
-            // }
         }
         self.datapoints+=1;
 
     }
 
+    /// Turn our metrics into a hashmap
     pub fn plot(&self) -> HashMap<String, Vec<T>> {
         let mut acc: HashMap<String, Vec<T>> = HashMap::new();
         for points in &self.data{
@@ -123,10 +128,7 @@ where
         acc
     }
 
-    // pub fn max(&self) -> Option<T> {
-    //     self.data.iter().filter_map(| MetricField { key: _, values } | values.iter().max()).max().cloned()
-    // }
-
+    /// The total number of datapoints
     pub fn datapoints(&self) -> usize {
         self.datapoints
     }
@@ -136,24 +138,21 @@ where
     fn init_metrics(&mut self, root: &serde_json::Map<String, serde_json::Value>) {
         for metric_field in &self.user_key {
             let new_data = get_root_elem(root, metric_field);
+
+            let mut raw_fields: Vec<(String, Number)> = Vec::new();
+
             match new_data {
                 // user has given us a value that maps to a single number value
                 Some(serde_json::Value::Number(val)) => {
-                    let raw: T = match serde_json::from_value(serde_json::Value::Number(val.clone())){
-                        Ok(v) => v,
-                        Err(e) => {
-                            error!("could not add metric {} to monitor, got unexpected type: {}", metric_field, e);
-                            continue;
-                        } 
-                    };
-                    self.data.push(MetricField { key: metric_field.to_string(), values: vec![raw] });
+                    raw_fields.push((metric_field.to_string(), val.clone()));
                 }
                 // user has given us a value that maps to a map with multiple values, recusively find all of them.
                 Some(serde_json::Value::Object(inner)) => {
                     // now we have a giant map we need to flatten
                     let flat_values = flatten_map(inner);
-                    for inner_key in flat_values {
-                        self.data.push(MetricField { key: format!("{}.{}", metric_field, inner_key), values: Vec::new() });
+                    for (inner_key, inner_val) in flat_values {
+                        let root_key = format!("{}.{}", metric_field, inner_key);
+                        raw_fields.push((root_key, inner_val));
                     }
                 },
                 _ => {
@@ -161,78 +160,41 @@ where
                 }
             }
 
-
-            // match new_data {
-            //     // user has given us a value that maps to a single number value
-            //     Some(serde_json::Value::Number(val)) => {
-            //         let wrapper: ValueHandler = val.into();
-            //         let ours: T = match wrapper.try_into() {
-            //             Ok(v) => v, 
-            //             Err(_) => {
-            //                 error!("could not add metric {} to monitor, got unexpected type", metric_field);
-            //                 continue;
-            //             }
-            //         };
-            //         self.data.push(MetricField { key: metric_field.to_string(), values: vec![ours] });
-            //         debug!("adding {} to metrics", metric_field);
-            //     }, 
-            //     None => {
-            //         debug!("key {} does not exist", metric_field);
-            //     },
-            //     // user has given us a value that maps to a map with multiple values, recusively find all of them.
-            //     Some(serde_json::Value::Object(inner)) => {
-            //         // now we have a giant map we need to flatten
-            //         let flat_values = flatten_map(inner);
-            //         for inner_key in flat_values {
-            //             self.data.push(MetricField { key: format!("{}.{}", metric_field, inner_key), values: Vec::new() });
-            //         }
-            //     },
-            //     _ => {
-            //         error!("key {} is not a number!", metric_field);
-            //     }
-            // };
+            // we now have an array of every key that comes from the user-supplied string. 
+            // validate each against our generic type
+            for (field_key, field_val) in raw_fields {
+                    let raw: I = match serde_json::from_value(serde_json::Value::Number(field_val)){
+                    Ok(v) => {
+                        debug!("got value for key {}", field_key);
+                        v
+                    },
+                    Err(e) => {
+                        error!("could not add metric {} to monitor, got unexpected type: {}", metric_field, e);
+                        continue;
+                    } 
+                };
+                self.data.push(MetricField { key: field_key, values: vec![self.processor.process(raw)] });
+            }
             
         }
-        // match &self.user_key {
 
-        //     MetricGroupType::Submap(key) => {
-        //         let new_data = get_root_elem(root, &key);
-        //         match new_data {
-        //             Some(serde_json::Value::Object(inner)) => {
-        //                 // now we have a giant map we need to flatten
-        //                 let flat_values = flatten_map(inner);
-        //                 for inner_key in flat_values {
-        //                     self.data.push(MetricField { key: format!("{}.{}", key, inner_key), values: Vec::new() });
-        //                 }
-        //             }
-        //             None => {
-        //                 debug!("key {} does not exist", key);
-        //             },
-        //             _ => {
-        //                 error!("key {} is not a map!", key);
-        //             }
-        //         }
-        //     }, 
-        //     MetricGroupType::List(values) => {
-
-        //     }
-        // }
     }
+
 }
 
 /// Flatten a map into a vector of dot-notated keys
-fn flatten_map(data: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
-    let mut acc: Vec<String> = Vec::new();
+fn flatten_map(data: &serde_json::Map<String, serde_json::Value>) -> Vec<(String, Number)> {
+    let mut acc: Vec<(String, Number)> = Vec::new();
 
     for (key, val) in data {
 
-        match val {
-            serde_json::Value::Number(_found_num) => {
-                acc.push(key.to_string());
+        match val { 
+            serde_json::Value::Number(found_num) => {
+                acc.push((key.to_string(), found_num.clone()));
             },
             serde_json::Value::Object(nested) => {
                 let inner = flatten_map(nested);
-                acc.extend(inner.into_iter().map(|k| format!("{}.{}", key, k)));
+                acc.extend(inner.into_iter().map(|(k,v)| (format!("{}.{}", key, k), v)));
             },
             _ => {
                 debug!("skipping {}", key);
@@ -269,6 +231,7 @@ fn get_root_elem<'a>(data: &'a serde_json::Map<String, serde_json::Value>, neste
 mod test {
     use std::collections::HashMap;
 
+    use serde_json::Number;
     use tracing::level_filters::LevelFilter;
     use tracing_subscriber::EnvFilter;
 
@@ -299,7 +262,7 @@ mod test {
         let data: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&create_nested_json(42, 45))?;
 
         let res = flatten_map(&data);
-        assert_eq!(res, vec!["root.l1.l2.l3.metric", "root.l1.l2.metric"]);
+        assert_eq!(res, vec![("root.l1.l2.l3.metric".to_string(), Number::from(42)), ("root.l1.l2.metric".to_string(), Number::from(45))]);
 
         Ok(())
     }
