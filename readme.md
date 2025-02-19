@@ -52,3 +52,8 @@ beatperf --memory --ndjson output.ndjson
 ```
 beatperf --memory --read output.ndjson
 ```
+
+generate a graph from a pre-existing ndjson file:
+```
+beatperf  -i 3 -v --memory --read output.ndjson
+```
