@@ -15,6 +15,7 @@ pub mod memory;
 pub mod pipeline;
 pub mod output;
 pub mod custom;
+pub mod kernel_tracing;
 
 mod generic;
  

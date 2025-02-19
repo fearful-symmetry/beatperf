@@ -2,7 +2,7 @@ use std::{fs::{read_to_string, File, OpenOptions}, time::Duration};
 
 use anyhow::Context;
 use clap::{ArgGroup, Parser};
-use groups::{custom::CustomMetrics, memory::MemoryMetrics, output::Output, pipeline::Pipeline, processdb::ProcessDB};
+use groups::{custom::CustomMetrics, kernel_tracing::KernelTracing, memory::MemoryMetrics, output::Output, pipeline::Pipeline, processdb::ProcessDB};
 use reqwest::IntoUrl;
 use serde_json::{Map, Value};
 use spinners::{Spinner, Spinners};
@@ -21,7 +21,7 @@ mod watchers;
 #[clap(author, version, about, long_about = None)]
 #[clap(group(
     ArgGroup::new("fields")
-        .args(&["metrics", "memory", "cpu", "processdb", "pipeline", "output", "ndjson"]) // if you're adding new metric groups, be sure to add them here
+        .args(&["metrics", "memory", "cpu", "processdb", "pipeline", "output", "ndjson", "kernel_tracing"]) // if you're adding new metric groups, be sure to add them here
         .multiple(true)
         .required(true)
 ))]
@@ -60,6 +60,11 @@ struct Cli {
     #[arg(long)]
     pipeline: bool,
 
+    /// report add_sesson_metadata's kernel_tracing metrics
+    #[arg(long)]
+    kernel_tracing: bool,
+
+
     /// Report output event metrics
     #[arg(long)]
     output: bool,
@@ -67,7 +72,6 @@ struct Cli {
     /// Debug logging
     #[arg(long, short)]
     verbose: bool,
-
 
     /// dump all beat metrics to an ndjson file
     #[arg(long)]
@@ -83,7 +87,7 @@ fn default_endpoint() -> String {
     "localhost:5066".to_string()
 }
 
-
+/// start up tasks for every configured watcher
 fn generate_readers(args: &Cli, tx: &mut Sender<Map<String, Value>>, realtime: bool) -> JoinSet<()> {
     let mut set = JoinSet::new();
     if args.memory {
@@ -99,6 +103,10 @@ fn generate_readers(args: &Cli, tx: &mut Sender<Map<String, Value>>, realtime: b
 
     if args.output {
         run_watch::<Output>(&mut set, tx, None, realtime);
+    }
+
+    if args.kernel_tracing {
+        run_watch::<KernelTracing>(&mut set, tx, None, realtime);
     }
 
     if  args.metrics.is_some() {

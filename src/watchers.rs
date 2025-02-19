@@ -22,10 +22,10 @@ pub fn run_watch<T: Watcher + Send + 'static>( set: &mut JoinSet<()>, broadcaste
             }
 
             if realtime && count % 5 == 0{
-                    debug!("updating plot...");
-                    if let Err(e) = watch.plot() {
-                        error!("error updating plot: {}", e)
-                    }
+                debug!("updating plot...");
+                if let Err(e) = watch.plot() {
+                    error!("error updating plot: {}", e)
+                }
             }
 
         }
@@ -35,4 +35,4 @@ pub fn run_watch<T: Watcher + Send + 'static>( set: &mut JoinSet<()>, broadcaste
             error!("error rendering plot: {}", e)
         }
     });
-}
+} // 75-140
