@@ -1,6 +1,6 @@
-## beatperf
+# beatperf
 
-A simple rust tool for reading and graphing metrics from beat's perf endpoint
+A simple rust tool for reading and graphing metrics from beat's perf endpoint.
 
 ### Requirements
 
@@ -13,6 +13,7 @@ sudo apt install pkg-config libfreetype6-dev libfontconfig1-dev
 ### Usage
 
 To enable metric reporting set `http.enabled: true` in the beat config.
+
 `beatperf` is fairly simple:
 
 ```
@@ -47,10 +48,6 @@ You can also read and write to an ndjson file:
 
 ```
 beatperf --memory --ndjson output.ndjson
-```
-
-```
-beatperf --memory --read output.ndjson
 ```
 
 generate a graph from a pre-existing ndjson file:
